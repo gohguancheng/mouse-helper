@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle display name shown in Activity Monitor, etc. -->
+    <key>CFBundleName</key>
+    <string>Mouse Helper</string>
+
+    <!-- Unique identifier for this app -->
+    <key>CFBundleIdentifier</key>
+    <string>com.mousehelper.app</string>
+
+    <!-- Version numbers -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <!-- CRITICAL: This makes the app a background/accessory app.
+         No dock icon, no application menu bar. Only the status bar item. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Minimum macOS version -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <!-- App requires accessibility access for CGEventTap -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Mouse Helper needs accessibility access to intercept mouse events and perform gesture-based actions like Mission Control and desktop switching.</string>
+</dict>
+</plist>
