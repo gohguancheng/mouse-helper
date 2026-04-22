@@ -33,6 +33,11 @@ class MouseInterceptor {
 
     private var state: GestureState = .idle
 
+    /// Whether we're currently tracking a middle-button gesture.
+    private var isTrackingGesture: Bool {
+        state == .pressed || state == .swiping || state == .longPressTriggered
+    }
+
     /// Where the middle button was first pressed (screen coordinates).
     private var pressOrigin: CGPoint = .zero
 
@@ -84,7 +89,8 @@ class MouseInterceptor {
             (1 << CGEventType.otherMouseDown.rawValue) |
             (1 << CGEventType.otherMouseUp.rawValue) |
             (1 << CGEventType.otherMouseDragged.rawValue) |
-            (1 << CGEventType.mouseMoved.rawValue)
+            (1 << CGEventType.mouseMoved.rawValue) |
+            (1 << CGEventType.scrollWheel.rawValue)
         )
 
         // Create the event tap.
@@ -136,6 +142,7 @@ class MouseInterceptor {
         eventTap = nil
         runLoopSource = nil
         state = .idle
+        missionControlTriggered = false
         print("🛑 Event tap stopped")
     }
 
@@ -169,13 +176,14 @@ class MouseInterceptor {
             return handleMiddleMouseDragged(event: event)
 
         case .mouseMoved:
-            // Only process mouseMoved if we're tracking a middle-button gesture.
-            // We include .longPressTriggered so the user can long-press to open
-            // Mission Control, then keep holding and swipe to switch desktops.
-            if state == .pressed || state == .swiping || state == .longPressTriggered {
+            // Some mice send mouseMoved instead of otherMouseDragged.
+            if isTrackingGesture {
                 return handleMiddleMouseDragged(event: event)
             }
             return event
+
+        case .scrollWheel:
+            return handleScrollWheel(event: event)
 
         default:
             // Pass through all other events untouched
@@ -235,33 +243,25 @@ class MouseInterceptor {
     }
 
     /// Mouse moved while middle button is held — check for swipe.
-    ///
-    /// Desktop switching via swipe is ONLY allowed when Mission Control is active.
-    /// This prevents accidental desktop switches during normal mouse use.
     private func handleMiddleMouseDragged(event: CGEvent) -> CGEvent? {
-        guard state == .pressed || state == .swiping || state == .longPressTriggered else {
-            return event
-        }
+        guard isTrackingGesture else { return event }
 
         let currentPos = event.location
         let deltaX = currentPos.x - pressOrigin.x
-        let deltaY = currentPos.y - pressOrigin.y
-        let totalMovement = sqrt(deltaX * deltaX + deltaY * deltaY)
+        // Use horizontal distance only so vertical mouse drift doesn't
+        // cancel a long press intended as a stationary hold.
+        let horizontalMovement = abs(deltaX)
 
         if state == .pressed {
-            // Check if movement exceeds the jitter threshold
-            if totalMovement > moveThreshold {
-                // Significant movement detected — cancel long press, start swipe
+            if horizontalMovement > moveThreshold {
                 longPressTimer?.invalidate()
                 longPressTimer = nil
                 state = .swiping
                 accumulatedDeltaX = deltaX
             }
         } else if state == .longPressTriggered {
-            // Mission Control was just opened via long press. If the user keeps
-            // holding and starts moving, transition to swiping mode so they can
-            // switch desktops within Mission Control.
-            if totalMovement > moveThreshold {
+            // User keeps holding after MC opened — transition to swiping.
+            if horizontalMovement > moveThreshold {
                 state = .swiping
                 // Reset the origin to the current position so deltaX is measured
                 // from where the swipe actually starts, not the original press.
@@ -278,9 +278,7 @@ class MouseInterceptor {
             let swipeDeltaX = currentPos.x - pressOrigin.x
             accumulatedDeltaX = swipeDeltaX
 
-            // Only switch desktops if Mission Control is active.
-            let mcActive = missionControlTriggered || SystemActions.isMissionControlActive
-            if abs(accumulatedDeltaX) > swipeThreshold && !hasSwitchedInCurrentSwipe && mcActive {
+            if abs(accumulatedDeltaX) > swipeThreshold && !hasSwitchedInCurrentSwipe {
                 // Natural direction: drag right → move left
                 let direction: SystemActions.SwipeDirection = accumulatedDeltaX > 0 ? .left : .right
                 SystemActions.switchDesktop(direction: direction)
@@ -290,6 +288,44 @@ class MouseInterceptor {
             // Suppress the drag event so it doesn't affect other apps
             return nil
         }
+
+        return event
+    }
+
+    // MARK: - Scroll Wheel (reverse for mouse, keep natural for trackpad)
+
+    /// Inverts scroll direction for mouse scroll events.
+    /// Trackpad/Magic Mouse events use scroll phases and are left unchanged.
+    private func handleScrollWheel(event: CGEvent) -> CGEvent? {
+        // Trackpad and Magic Mouse events always carry scroll phases
+        // (began/changed/ended for active scrolling, momentum phases for inertia).
+        // Mouse wheel events — even high-resolution "smooth scroll" wheels — never
+        // set these fields. This is more reliable than checking isContinuous,
+        // which some smooth-scroll mice also set.
+        let scrollPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+        let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+        let isTrackpad = scrollPhase != 0 || momentumPhase != 0
+        if isTrackpad {
+            return event
+        }
+
+        // Invert both axes for discrete (mouse wheel) events
+        let deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        let deltaX = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -deltaY)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -deltaX)
+
+        // Also invert the point deltas (used by some apps for smooth scrolling)
+        let pointDeltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+        let pointDeltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
+        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: -pointDeltaY)
+        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: -pointDeltaX)
+
+        // Invert fixed-point deltas too
+        let fixedDeltaY = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+        let fixedDeltaX = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixedDeltaY)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixedDeltaX)
 
         return event
     }
@@ -336,11 +372,13 @@ class MouseInterceptor {
         )
 
         // Set the re-entrancy guard so our event tap passes these through
-        // without trying to intercept them again.
+        // without trying to intercept them again. Reset on the next run loop
+        // iteration because CGEvent.post() is asynchronous — the events may
+        // arrive at our tap after this function returns.
         isSynthesizing = true
         mouseDown?.post(tap: .cghidEventTap)
         mouseUp?.post(tap: .cghidEventTap)
-        isSynthesizing = false
+        DispatchQueue.main.async { [weak self] in self?.isSynthesizing = false }
     }
 }
 
@@ -371,20 +409,17 @@ private func eventTapCallback(
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
-    // Recover our MouseInterceptor instance from the raw pointer.
     guard let userInfo = userInfo else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     let interceptor = Unmanaged<MouseInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
 
-    // Delegate to our Swift handler.
     if let resultEvent = interceptor.handleEvent(type: type, event: event) {
-        return Unmanaged.passRetained(resultEvent)
+        return Unmanaged.passUnretained(resultEvent)
     } else {
-        // Returning nil suppresses the event — it won't reach any app.
         return nil
     }
 }
