@@ -295,39 +295,49 @@ class MouseInterceptor {
     // MARK: - Scroll Wheel (reverse for mouse, keep natural for trackpad)
 
     /// Inverts scroll direction for mouse scroll events.
-    /// Trackpad/Magic Mouse events use scroll phases and are left unchanged.
+    ///
+    /// Detection: Trackpad/Magic Mouse events are identified by having
+    /// `isContinuous` set, or non-zero scroll/momentum phases. Mouse wheel
+    /// events — even high-resolution smooth-scroll wheels — have none of these.
+    ///
+    /// Approach: Instead of modifying the original event in-place (which
+    /// doesn't reliably propagate for scroll events on all macOS versions),
+    /// we suppress the original and post a modified copy at the session
+    /// event tap level. The session-level post bypasses our HID-level tap,
+    /// avoiding re-entrancy issues.
     private func handleScrollWheel(event: CGEvent) -> CGEvent? {
-        // Trackpad and Magic Mouse events always carry scroll phases
-        // (began/changed/ended for active scrolling, momentum phases for inertia).
-        // Mouse wheel events — even high-resolution "smooth scroll" wheels — never
-        // set these fields. This is more reliable than checking isContinuous,
-        // which some smooth-scroll mice also set.
+        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
         let scrollPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
         let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
-        let isTrackpad = scrollPhase != 0 || momentumPhase != 0
-        if isTrackpad {
-            return event
+
+        if isContinuous || scrollPhase != 0 || momentumPhase != 0 {
+            return event  // Trackpad/Magic Mouse — leave unchanged
         }
 
-        // Invert both axes for discrete (mouse wheel) events
+        // Mouse wheel event — suppress original and post inverted copy
+        guard let copy = event.copy() else { return event }
+
+        // Invert line deltas (primary scroll unit)
         let deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
         let deltaX = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -deltaY)
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -deltaX)
+        copy.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -deltaY)
+        copy.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -deltaX)
 
-        // Also invert the point deltas (used by some apps for smooth scrolling)
+        // Invert point deltas (used by some apps for smooth/pixel scrolling)
         let pointDeltaY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
         let pointDeltaX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
-        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: -pointDeltaY)
-        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: -pointDeltaX)
+        copy.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: -pointDeltaY)
+        copy.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: -pointDeltaX)
 
-        // Invert fixed-point deltas too
+        // Invert fixed-point deltas
         let fixedDeltaY = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
         let fixedDeltaX = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixedDeltaY)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixedDeltaX)
+        copy.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixedDeltaY)
+        copy.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixedDeltaX)
 
-        return event
+        // Post at session level — bypasses our HID-level tap so no infinite loop
+        copy.post(tap: .cgSessionEventTap)
+        return nil  // Suppress the original event
     }
 
     // MARK: - Long Press
